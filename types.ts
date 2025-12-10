@@ -8,6 +8,7 @@ export interface Card {
   accepted_answers_de: string[];
   level: string;
   topic: string;
+  language?: string;
 }
 
 export interface LoadedFile {

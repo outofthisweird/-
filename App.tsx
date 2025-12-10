@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Layout } from './components/Layout';
 import { Button } from './components/Button';
 import { Card, AppState, STORAGE_KEY_WRONG_CARDS, STORAGE_KEY_MEMOS, LoadedFile } from './types';
-import { Upload, FileText, Play, CheckCircle2, XCircle, ArrowRight, BookMarked, AlertCircle, RotateCcw, Home, RefreshCw, Trash2, Plus, Layers, GraduationCap, ChevronLeft, ChevronRight, PenLine, Shuffle } from 'lucide-react';
+import { Upload, FileText, Play, CheckCircle2, XCircle, ArrowRight, BookMarked, AlertCircle, RotateCcw, Home, RefreshCw, Trash2, Plus, Layers, GraduationCap, ChevronLeft, ChevronRight, PenLine, Shuffle, Globe } from 'lucide-react';
 
 // --- Utils ---
 const normalizeAnswer = (input: string): string => {
@@ -10,19 +10,25 @@ const normalizeAnswer = (input: string): string => {
 };
 
 const validateCard = (obj: any): boolean => {
+  // Relaxed validation to support the new schema where some fields might be inferred
   return (
     typeof obj === 'object' &&
     obj !== null &&
-    typeof obj.id === 'number' &&
     typeof obj.lemma === 'string' &&
-    typeof obj.prompt_ko === 'string' &&
-    Array.isArray(obj.accepted_answers_de)
+    Array.isArray(obj.translations_ko)
   );
+};
+
+// Helper to strip internal IDs (e.g., "fern_198" -> "fern")
+const cleanText = (text: string): string => {
+  if (!text) return "";
+  return text.replace(/_\d+$/, '');
 };
 
 const parseJSONL = (text: string): { cards: Card[], error?: string } => {
   const lines = text.trim().split('\n');
   const cards: Card[] = [];
+  const seen = new Set<string>();
   let invalidCount = 0;
 
   lines.forEach((line, index) => {
@@ -30,7 +36,41 @@ const parseJSONL = (text: string): { cards: Card[], error?: string } => {
     try {
       const obj = JSON.parse(line);
       if (validateCard(obj)) {
-        cards.push(obj);
+        // Prepare cleaned lemma
+        const rawLemma = obj.lemma;
+        const displayLemma = cleanText(rawLemma);
+        const displayFullForm = obj.full_form ? cleanText(obj.full_form) : displayLemma;
+
+        // Construct Card object with defaults for missing fields
+        const card: Card = {
+          id: typeof obj.id === 'number' ? obj.id : Date.now() + index, // Generate ID if missing
+          lemma: displayLemma,
+          gender: obj.gender || null,
+          full_form: displayFullForm, 
+          translations_ko: obj.translations_ko,
+          prompt_ko: obj.prompt_ko || obj.translations_ko[0] || '???', // Default prompt to first translation
+          accepted_answers_de: Array.isArray(obj.accepted_answers_de) 
+            ? obj.accepted_answers_de.map((ans: string) => cleanText(ans).toLowerCase())
+            : [displayLemma.toLowerCase()], // Default answers to lemma
+          level: obj.level || 'Unknown',
+          topic: obj.topic || 'General',
+          language: obj.language || 'German' // Default language
+        };
+
+        // Deduplication: Create a signature based on content fields
+        const signature = JSON.stringify({
+          lang: card.language,
+          lemma: card.lemma,
+          gender: card.gender,
+          trans: card.translations_ko,
+          level: card.level,
+          topic: card.topic
+        });
+
+        if (!seen.has(signature)) {
+          seen.add(signature);
+          cards.push(card);
+        }
       } else {
         console.warn(`Invalid card structure at line ${index + 1}`);
         invalidCount++;
@@ -189,10 +229,10 @@ const DataManagerView: React.FC<DataManagerViewProps> = ({ files, onAddFile, onR
       <div className="text-center pt-4">
          <button 
             onClick={() => {
-              const sampleData = `{"id":1,"lemma":"Apfel","gender":"m","full_form":"der Apfel","translations_ko":["사과"],"prompt_ko":"사과","accepted_answers_de":["der apfel"],"level":"A1","topic":"Food"}\n{"id":2,"lemma":"Buch","gender":"n","full_form":"das Buch","translations_ko":["책"],"prompt_ko":"책","accepted_answers_de":["das buch"],"level":"A1","topic":"Object"}`;
+              const sampleData = `{"lemma":"constitution","gender":null,"translations_ko":["헌법"],"level":"B2","topic":"정치/공공","language":"English"}\n{"id":1,"lemma":"Apfel","gender":"m","full_form":"der Apfel","translations_ko":["사과"],"prompt_ko":"사과","accepted_answers_de":["der apfel"],"level":"A1","topic":"Food","language":"German"}`;
               const { cards } = parseJSONL(sampleData);
               const newFile: LoadedFile = {
-                  id: "sample-id", name: "Sample_Data.jsonl", cards, timestamp: Date.now()
+                  id: "sample-id", name: "Sample_Multi_Lang.jsonl", cards, timestamp: Date.now()
               };
               (onAddFile as any)(newFile);
             }}
@@ -209,15 +249,23 @@ const DataManagerView: React.FC<DataManagerViewProps> = ({ files, onAddFile, onR
 interface LearningViewProps {
   allCards: Card[];
   onGoToManager: () => void;
+  availableLanguages: string[];
+  selectedLanguage: string;
+  onSelectLanguage: (lang: string) => void;
 }
 
-const LearningView: React.FC<LearningViewProps> = ({ allCards, onGoToManager }) => {
+const LearningView: React.FC<LearningViewProps> = ({ allCards, onGoToManager, availableLanguages, selectedLanguage, onSelectLanguage }) => {
   const [mode, setMode] = useState<'SELECT' | 'STUDY'>('SELECT');
   const [targetLevel, setTargetLevel] = useState<string>('A1');
   const [isShuffle, setIsShuffle] = useState(false);
   const [studyCards, setStudyCards] = useState<Card[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [memos, setMemos] = useState<Record<number, string>>({});
+
+  // Filter cards by selected language
+  const languageCards = useMemo(() => {
+    return allCards.filter(c => (c.language || 'German') === selectedLanguage);
+  }, [allCards, selectedLanguage]);
 
   // Load memos on mount
   useEffect(() => {
@@ -241,14 +289,14 @@ const LearningView: React.FC<LearningViewProps> = ({ allCards, onGoToManager }) 
 
   // Levels for selection
   const levels = useMemo(() => {
-    const lvls = Array.from(new Set(allCards.map(c => c.level))).sort();
+    const lvls = Array.from(new Set(languageCards.map(c => c.level))).sort();
     return ['ALL', ...lvls];
-  }, [allCards]);
+  }, [languageCards]);
 
   const startLearning = () => {
-    let filtered = allCards;
+    let filtered = languageCards;
     if (targetLevel !== 'ALL') {
-      filtered = allCards.filter(c => c.level === targetLevel);
+      filtered = languageCards.filter(c => c.level === targetLevel);
     }
     
     if (filtered.length === 0) {
@@ -350,8 +398,28 @@ const LearningView: React.FC<LearningViewProps> = ({ allCards, onGoToManager }) 
           </p>
         </div>
 
+        {availableLanguages.length > 1 && (
+          <div className="flex flex-wrap gap-2 justify-center w-full max-w-xl">
+             {availableLanguages.map(lang => (
+               <button 
+                  key={lang}
+                  onClick={() => onSelectLanguage(lang)}
+                  className={`px-4 py-2 rounded-full text-sm font-bold transition-all
+                    ${selectedLanguage === lang 
+                      ? 'bg-slate-800 text-white shadow-md transform scale-105' 
+                      : 'bg-white text-slate-500 border border-slate-200 hover:border-slate-300'}
+                  `}
+               >
+                 {lang}
+               </button>
+             ))}
+          </div>
+        )}
+
         <div className="w-full space-y-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-            <label className="block text-sm font-medium text-slate-700">난이도 선택</label>
+            <label className="block text-sm font-medium text-slate-700">
+               {selectedLanguage} 난이도 선택
+            </label>
             <div className="grid grid-cols-3 gap-3">
               {levels.map(lvl => (
                 <button
@@ -419,6 +487,9 @@ const LearningView: React.FC<LearningViewProps> = ({ allCards, onGoToManager }) 
              <div className={`rounded-2xl shadow-xl border p-8 md:p-12 text-center relative flex flex-col min-h-[460px] justify-between transition-colors duration-500 ${theme.bg} ${theme.border}`}>
                 {/* Meta Badge */}
                 <div className="flex justify-center gap-2 mb-6">
+                  <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-white/50 text-slate-600 border border-slate-200`}>
+                    {currentCard.language || 'German'}
+                  </span>
                   <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${theme.badge} bg-opacity-50`}>
                     {currentCard.level}
                   </span>
@@ -512,16 +583,30 @@ const LearningView: React.FC<LearningViewProps> = ({ allCards, onGoToManager }) 
 // 3. Config View (Refactored to include Clear Wrong Cards)
 interface ConfigViewProps {
   totalCards: number;
-  levels: string[];
   onStart: (level: string | null) => void;
   onGoToManager: () => void;
   savedWrongCardsCount: number;
   onStartReview: () => void;
   onClearWrongCards: () => void;
+  availableLanguages: string[];
+  selectedLanguage: string;
+  onSelectLanguage: (lang: string) => void;
+  allCards: Card[];
 }
 
-const ConfigView: React.FC<ConfigViewProps> = ({ totalCards, levels, onStart, onGoToManager, savedWrongCardsCount, onStartReview, onClearWrongCards }) => {
+const ConfigView: React.FC<ConfigViewProps> = ({ totalCards, onStart, onGoToManager, savedWrongCardsCount, onStartReview, onClearWrongCards, availableLanguages, selectedLanguage, onSelectLanguage, allCards }) => {
   const [selectedLevel, setSelectedLevel] = useState<string>('A1');
+  
+  // Compute levels for selected language
+  const levels = useMemo(() => {
+    const langCards = allCards.filter(c => (c.language || 'German') === selectedLanguage);
+    const lvls = Array.from(new Set(langCards.map(c => c.level))).sort();
+    return ['ALL', ...lvls];
+  }, [allCards, selectedLanguage]);
+
+  const currentLanguageCardsCount = useMemo(() => {
+    return allCards.filter(c => (c.language || 'German') === selectedLanguage).length;
+  }, [allCards, selectedLanguage]);
 
   if (totalCards === 0 && savedWrongCardsCount === 0) {
     return (
@@ -549,6 +634,26 @@ const ConfigView: React.FC<ConfigViewProps> = ({ totalCards, levels, onStart, on
         </p>
       </div>
 
+      {/* Language Tabs */}
+      {availableLanguages.length > 1 && (
+        <div className="flex flex-wrap gap-2 justify-center w-full">
+           {availableLanguages.map(lang => (
+             <button 
+                key={lang}
+                onClick={() => onSelectLanguage(lang)}
+                className={`px-4 py-2 rounded-full text-sm font-bold transition-all flex items-center gap-2
+                  ${selectedLanguage === lang 
+                    ? 'bg-slate-800 text-white shadow-md transform scale-105' 
+                    : 'bg-white text-slate-500 border border-slate-200 hover:border-slate-300'}
+                `}
+             >
+               <Globe size={14} />
+               {lang}
+             </button>
+           ))}
+        </div>
+      )}
+
       {savedWrongCardsCount > 0 && (
         <div className="w-full bg-red-50 border border-red-100 rounded-xl p-4 flex items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -573,12 +678,18 @@ const ConfigView: React.FC<ConfigViewProps> = ({ totalCards, levels, onStart, on
         </div>
       )}
 
-      {totalCards > 0 && (
+      {currentLanguageCardsCount > 0 && (
         <>
           <div className="w-full space-y-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-            <label className="block text-sm font-medium text-slate-700">난이도 선택</label>
+            <div className="flex justify-between items-center mb-2">
+              <label className="block text-sm font-medium text-slate-700">{selectedLanguage} 난이도 선택</label>
+              <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-full">
+                {currentLanguageCardsCount} cards
+              </span>
+            </div>
+            
             <div className="grid grid-cols-3 gap-3">
-              {['A1', 'A2', 'B1', 'B2', 'ALL'].map(lvl => (
+              {levels.map(lvl => (
                 <button
                   key={lvl}
                   onClick={() => setSelectedLevel(lvl)}
@@ -718,7 +829,7 @@ const QuizView: React.FC<QuizViewProps> = ({ cards, onExit, onRetry, isReviewMod
       <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-8 md:p-12 text-center relative overflow-hidden min-h-[400px] flex flex-col">
         {isReviewMode && <div className="absolute top-4 right-4 bg-red-100 text-red-700 text-xs font-bold px-2 py-1 rounded">오답 노트</div>}
         <div className="flex-1 flex flex-col justify-center items-center mb-8">
-           <span className="text-slate-400 text-xs font-bold tracking-wider uppercase mb-3">{currentCard.level} • {currentCard.topic}</span>
+           <span className="text-slate-400 text-xs font-bold tracking-wider uppercase mb-3">{currentCard.language || 'German'} • {currentCard.level} • {currentCard.topic}</span>
            <h3 className="text-3xl md:text-4xl font-bold text-slate-800 leading-tight">{currentCard.prompt_ko}</h3>
            <p className="text-slate-400 text-sm mt-4">이에 해당하는 단어를<br/>입력하세요.</p>
         </div>
@@ -758,11 +869,24 @@ export default function App() {
   const [quizCards, setQuizCards] = useState<Card[]>([]);
   const [savedWrongCards, setSavedWrongCards] = useState<Card[]>([]);
   const [isReviewMode, setIsReviewMode] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState<string>('German');
 
   // Compute all cards from files
   const allCards = useMemo(() => {
     return loadedFiles.flatMap(f => f.cards);
   }, [loadedFiles]);
+
+  const availableLanguages = useMemo(() => {
+     const langs = new Set(allCards.map(c => c.language || 'German'));
+     return Array.from(langs).sort();
+  }, [allCards]);
+
+  // Set default language on load
+  useEffect(() => {
+    if (availableLanguages.length > 0 && !availableLanguages.includes(selectedLanguage)) {
+      setSelectedLanguage(availableLanguages[0]);
+    }
+  }, [availableLanguages, selectedLanguage]);
 
   useEffect(() => {
     const saved = localStorage.getItem(STORAGE_KEY_WRONG_CARDS);
@@ -780,9 +904,9 @@ export default function App() {
   };
 
   const handleStartQuiz = (level: string | null) => {
-    let filtered = allCards;
+    let filtered = allCards.filter(c => (c.language || 'German') === selectedLanguage);
     if (level) {
-      filtered = allCards.filter(c => c.level === level);
+      filtered = filtered.filter(c => c.level === level);
     }
     
     if (filtered.length === 0) {
@@ -832,7 +956,7 @@ export default function App() {
       {appState === AppState.DATA_MANAGER && (
         <DataManagerView 
           files={loadedFiles}
-          onAddFile={(file: any) => handleAddFile(file)} // Using any cast due to the earlier parsing trick
+          onAddFile={(file: any) => handleAddFile(file)} 
           onRemoveFile={handleRemoveFile}
           onGoHome={goHome}
         />
@@ -841,12 +965,16 @@ export default function App() {
       {appState === AppState.HOME && (
         <ConfigView 
           totalCards={allCards.length}
-          levels={Array.from(new Set(allCards.map(c => c.level))).sort()}
+          // Note: levels prop is no longer passed as it's computed inside based on selectedLanguage
           onStart={handleStartQuiz}
           onGoToManager={() => setAppState(AppState.DATA_MANAGER)}
           savedWrongCardsCount={savedWrongCards.length}
           onStartReview={handleStartReview}
           onClearWrongCards={handleClearWrongCards}
+          availableLanguages={availableLanguages}
+          selectedLanguage={selectedLanguage}
+          onSelectLanguage={setSelectedLanguage}
+          allCards={allCards}
         />
       )}
 
@@ -854,6 +982,9 @@ export default function App() {
         <LearningView 
           allCards={allCards}
           onGoToManager={() => setAppState(AppState.DATA_MANAGER)}
+          availableLanguages={availableLanguages}
+          selectedLanguage={selectedLanguage}
+          onSelectLanguage={setSelectedLanguage}
         />
       )}
 

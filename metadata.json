@@ -1,0 +1,5 @@
+{
+  "name": "준벅식올단어",
+  "description": "card.jsonl 파일을 로드하여 동작하는 나만의 단어 퀴즈 앱입니다. 정확한 정답 판정과 레벨별 학습을 지원합니다.",
+  "requestFramePermissions": []
+}
